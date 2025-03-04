@@ -1,0 +1,150 @@
+---
+title: "Adjustment sets and MLE"
+format: html
+---
+
+## Introduction
+
+We now make some basic numerical experiments to understand the differences between different adjustment sets and between estimation via OLS or via Maximum Likelihood.
+
+## Generating DAG and data
+
+We first define a very simple DAG on $p = 7$ variables, displayed below:
+
+```{r}
+p <- 7
+DAG <- matrix(0,p,p)
+DAG[1,2] <- DAG[2,3] <- DAG[2,5] <- DAG[3,6] <- 
+  DAG[4,6] <- DAG[5,6] <- DAG[5,7] <- DAG[6,7] <- 1
+gRbase::plot(BCDAG::as_graphNEL(DAG))
+```
+
+We now generate the parameters of the corresponding Gaussian DAG model. We will fix $\boldsymbol{D} = \boldsymbol{I}_p$ and generate $\boldsymbol{L}$ by sampling the non-zero off-diagonal elements uniformly at random in the interval $(1.2,2)$. The covariance matrix $\boldsymbol{\Sigma}_\mathcal{D}$ is then derived as $\boldsymbol{\Sigma}_\mathcal{D} = \boldsymbol{L}^{-T}\boldsymbol{L}^{-1}$
+
+```{r}
+set.seed(1)
+L <- diag(1,p) - runif(p^2, 1.2, 2)*DAG
+Sigma <- solve(t(L))%*%solve(L)
+```
+
+We consider estimating the causal effect of $X_5$ on $X_7$. Intuitively, this corresponds to the sum of the path coefficients associated with the directed paths from node $5$ to node $7$ in the DAG.
+
+```{r}
+trueCE <- -L[5,7] + L[5,6]*L[6,7]
+trueCE
+```
+
+We can now generate the data, sampling from the corresponding multivariate Normal distribution. As we are also interested in evaluating the variance of our estimators, we generate $B = 1000$ dataasets of size $n = 100$.
+
+```{r}
+n <- 100
+B <- 1000
+set.seed(1)
+Xs <- lapply(1:B, function(b) mvtnorm::rmvnorm(n, sigma = Sigma))
+```
+
+## Ordinaly Least Squares
+
+From the DAG, we can identify different valid adjustment sets just by using the backdoor criterion. We will consider the following ones:
+
+```{r}
+t <- 5; y <- 7
+Z1 <- c(1,2)
+Z2 <- c(2,3)
+Z3 <- c(1,3)
+Z4 <- c(3,4)
+```
+
+Now, for each of them we compute the OLS estimate of the causal effect $\gamma_{57}$
+
+```{r}
+ce.z1 <- ce.z2 <- ce.z3 <- ce.z4 <- vector("double", B)
+for (b in 1:B) {
+  tXXb <- crossprod(Xs[[b]])
+  ce.z1[b] <- (solve(tXXb[c(t,Z1), c(t,Z1)])%*%tXXb[c(t,Z1),y])[1]
+  ce.z2[b] <- (solve(tXXb[c(t,Z2), c(t,Z2)])%*%tXXb[c(t,Z2),y])[1]
+  ce.z3[b] <- (solve(tXXb[c(t,Z3), c(t,Z3)])%*%tXXb[c(t,Z3),y])[1]
+  ce.z4[b] <- (solve(tXXb[c(t,Z4), c(t,Z4)])%*%tXXb[c(t,Z4),y])[1]
+}
+```
+
+We can now compare the estimates to the true value and approximate their variance:
+
+```{r}
+trueCE; mean(ce.z1); mean(ce.z2); mean(ce.z3); mean(ce.z4)
+sd(ce.z1); sd(ce.z2); sd(ce.z3); sd(ce.z4)
+```
+
+All the different adjustment sets lead to unbiased estimates, but their variance can vary a lot! In this case, $Z_4$ is the best valid adjustment set, as it is the one that leads to the OLS estimate with lowest variance!
+
+Let's now compare to what happens with MLE
+
+## Maximum Likelihood
+
+We first implement a function that computes the MLE of $(\boldsymbol{L}, \boldsymbol{D})$
+
+```{r}
+GaussDAG_LDmle <- function(DAG, X) {
+  tXX <- crossprod(X); n <- nrow(X)
+  p <- ncol(DAG)
+  L <- diag(1,p); D <- diag(1,p)
+  for (j in 1:p) {
+    pa <- which(DAG[,j] != 0)
+    if (length(pa) != 0) {
+      invXXpa <- solve(tXX[pa,pa])
+      L[pa,j] <- -invXXpa%*%tXX[pa,j]
+      D[j,j] <- (tXX[j,j] - tXX[j,pa]%*%invXXpa%*%tXX[pa,j])/n
+    } else {
+      D[j,j] <- tXX[j,j]/n
+    }
+  }
+  out <- list(L = L, D = D)
+  return(out)
+}
+```
+
+For instance, when applied on the first dataset in `Xs`:
+
+```{r}
+GaussDAG_LDmle(DAG, Xs[[1]])
+```
+
+We now repeat the same analysis as before.
+
+```{r}
+ce.mle.z1 <- ce.mle.z2 <- ce.mle.z3 <- ce.mle.z4 <- vector("double", B)
+for (b in 1:B) {
+  LD <- GaussDAG_LDmle(DAG, Xs[[b]])
+  Sigmab <- solve(t(LD$L))%*%LD$D%*%solve(LD$L)
+  ce.mle.z1[b] <- (solve(Sigmab[c(t,Z1), c(t,Z1)])%*%Sigmab[c(t,Z1),y])[1]
+  ce.mle.z2[b] <- (solve(Sigmab[c(t,Z2), c(t,Z2)])%*%Sigmab[c(t,Z2),y])[1]
+  ce.mle.z3[b] <- (solve(Sigmab[c(t,Z3), c(t,Z3)])%*%Sigmab[c(t,Z3),y])[1]
+  ce.mle.z4[b] <- (solve(Sigmab[c(t,Z4), c(t,Z4)])%*%Sigmab[c(t,Z4),y])[1]
+}
+```
+
+```{r}
+mean(ce.mle.z1); mean(ce.mle.z2); mean(ce.mle.z3); mean(ce.mle.z4)
+sd(ce.mle.z1); sd(ce.mle.z2); sd(ce.mle.z3); sd(ce.mle.z4)
+```
+
+Wait what
+
+```{r}
+head(ce.mle.z1); head(ce.mle.z2)
+```
+
+All the different adjustment sets lead to exactly the same estimate! Moreover, their variance is lower than the one obtained with OLS and the best adjustment set. This last thing is expected from the properties of Maximum Likelihood, but what is happening, intuitively? Let's compare the OLS and MLE on the same dataset:
+
+```{r}
+c(t,Z1)
+  ##OLS
+tXX1 <- crossprod(Xs[[1]])
+round(as.vector(solve(tXX1[c(t,Z1), c(t,Z1)])%*%tXX1[c(t,Z1),y]), 10)
+  ##MLE
+LD1 <- GaussDAG_LDmle(DAG, crossprod(Xs[[1]]), n)
+Sigma1 <- solve(t(LD1$L))%*%LD1$D%*%solve(LD1$L)
+round(as.vector(solve(Sigma1[c(t,Z1), c(t,Z1)])%*%Sigma1[c(t,Z1),y]), 10)
+```
+
+In the MLE, the regression coefficient associated with $X_1$ in a regression of $X_7$ on $(X_5, X_1, X_2)$ is exactly zero, as $X_1 \perp X_7 \mid (X_5, X_1)$ in the DAG! The MLE is making use of this information, while the OLS estimator is not.
